@@ -4,9 +4,16 @@
 서브프로세스 TCP 클라이언트 + 옵저버 패턴 테스트
 """
 
+import sys
+from pathlib import Path
+
+# 프로젝트 루트를 sys.path에 추가
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
 import time
 import json
-from analysis.socketmanager import (
+from service.manager.socketmanager import (
     SubprocessTCPClient,
     SocketObserver,
     SocketDataListener,
