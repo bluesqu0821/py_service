@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 import time
 import atexit
-from multiprocessing import Process, Queue as MPQueue
+from multiprocessing import Process, Queue as MPQueue, Event as MPEvent
 import json
 import struct
 
@@ -228,6 +228,7 @@ class SubprocessTCPClient:
         # 프로세스 간 통신
         self.data_queue = MPQueue()
         self.command_queue = MPQueue()
+        self.stop_event = MPEvent()  # 즉시 종료 신호
 
         # 서브프로세스
         self.process: Optional[Process] = None
@@ -246,6 +247,7 @@ class SubprocessTCPClient:
 
         # 데이터 처리 스레드
         self.processor_thread: Optional[threading.Thread] = None
+        self.thread_stop_event = threading.Event()  # 스레드 종료 신호
 
         atexit.register(self.stop)
 
@@ -257,6 +259,10 @@ class SubprocessTCPClient:
 
         self.running = True
 
+        # stop event 초기화
+        self.stop_event.clear()
+        self.thread_stop_event.clear()
+
         # 서브프로세스 시작
         self.process = Process(
             target=self._tcp_loop,
@@ -265,6 +271,7 @@ class SubprocessTCPClient:
                 self.port,
                 self.data_queue,
                 self.command_queue,
+                self.stop_event,
                 self.auto_reconnect,
                 self.reconnect_interval,
                 self.buffer_size,
@@ -287,34 +294,33 @@ class SubprocessTCPClient:
         port,
         data_queue,
         command_queue,
+        stop_event,
         auto_reconnect,
         reconnect_interval,
         buffer_size,
     ):
         """TCP 연결 및 수신 루프 (서브프로세스에서 실행)"""
         sock = None
-        running = True
 
-        while running:
+        while not stop_event.is_set():
             try:
                 # 연결 시도
                 print(f"[프로세스] {host}:{port} 연결 시도...")
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(5.0)
                 sock.connect((host, port))
-                sock.settimeout(1.0)
+                sock.settimeout(0.1)  # 짧은 타임아웃으로 빠른 종료
 
                 # 연결 성공 알림
                 data_queue.put(("connection", True))
                 print(f"[프로세스] 연결 성공: {host}:{port}")
 
                 # 수신 루프
-                while running:
+                while not stop_event.is_set():
                     # 명령 확인
                     try:
                         cmd = command_queue.get_nowait()
                         if cmd == "stop":
-                            running = False
                             break
                         elif cmd == "disconnect":
                             print("[프로세스] 연결 종료 명령 수신")
@@ -356,9 +362,13 @@ class SubprocessTCPClient:
                 data_queue.put(("connection", False))
 
             # 재연결 시도
-            if running and auto_reconnect:
+            if not stop_event.is_set() and auto_reconnect:
                 print(f"[프로세스] {reconnect_interval}초 후 재연결 시도...")
-                time.sleep(reconnect_interval)
+                # 재연결 대기 중에도 stop_event 확인
+                for _ in range(int(reconnect_interval * 10)):
+                    if stop_event.is_set():
+                        break
+                    time.sleep(0.1)
             else:
                 break
 
@@ -366,10 +376,10 @@ class SubprocessTCPClient:
 
     def _process_data(self):
         """데이터 처리 루프 (별도 스레드)"""
-        while self.running:
+        while not self.thread_stop_event.is_set():
             try:
-                # 큐에서 데이터 가져오기
-                msg_type, data = self.data_queue.get(timeout=1)
+                # 큐에서 데이터 가져오기 (짧은 타임아웃)
+                msg_type, data = self.data_queue.get(timeout=0.1)
 
                 if msg_type == "data":
                     # 데이터 파싱
@@ -416,18 +426,26 @@ class SubprocessTCPClient:
         print("TCP 클라이언트 중지 중...")
         self.running = False
 
-        # 프로세스에 종료 명령
-        self.command_queue.put("stop")
+        # 즉시 종료 신호 전송
+        self.stop_event.set()
+        self.thread_stop_event.set()
+
+        # 프로세스에 종료 명령 (추가 보장)
+        try:
+            self.command_queue.put_nowait("stop")
+        except:
+            pass
+
+        # 스레드 먼저 종료 대기 (더 빠름)
+        if self.processor_thread and self.processor_thread.is_alive():
+            self.processor_thread.join(timeout=0.5)  # 0.5초로 단축
 
         # 프로세스 종료 대기
         if self.process and self.process.is_alive():
-            self.process.join(timeout=3)
+            self.process.join(timeout=0.5)  # 0.5초로 단축
             if self.process.is_alive():
                 self.process.terminate()
-
-        # 스레드 종료 대기
-        if self.processor_thread and self.processor_thread.is_alive():
-            self.processor_thread.join(timeout=2)
+                self.process.join(timeout=0.2)  # terminate 후 짧은 대기
 
         print("TCP 클라이언트 중지됨")
 
