@@ -1,454 +1,361 @@
 # -*- coding: utf-8 -*-
 """
-Subprocess-based TCP Socket Manager with Observer Pattern
-서브프로세스 기반 TCP 소켓 통신 + 옵저버 패턴
+Socket Manager with Singleton Pattern
+소켓 매니저 - Singleton 패턴으로 소켓 인스턴스 관리
 """
 
-import socket
 import threading
-import queue
-from typing import Optional, Callable, Tuple, List, Any, Dict
-from dataclasses import dataclass, field
-from abc import ABC, abstractmethod
-import time
 import atexit
-from multiprocessing import Process, Queue as MPQueue, Event as MPEvent
-import json
-import struct
+from typing import Optional, Dict
+from service.core.socket import (
+    TCPClient,
+    SocketObserver,
+    SocketDataListener,
+    ParsedMessage,
+)
 
 
-@dataclass
-class SocketMessage:
-    """수신된 소켓 메시지"""
+class SocketManager:
+    """
+    소켓 매니저 (Singleton)
+    TCP 클라이언트 인스턴스를 중앙에서 관리
+    """
 
-    data: bytes
-    address: Tuple[str, int]
-    timestamp: float
+    _instance = None
+    _lock = threading.Lock()
 
-
-@dataclass
-class ParsedMessage:
-    """파싱된 메시지 데이터"""
-
-    message_type: str
-    payload: Any
-    raw_data: bytes
-    timestamp: float
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-# ==================== Observer Pattern ====================
-
-
-class SocketDataListener(ABC):
-    """소켓 데이터 리스너 인터페이스"""
-
-    @abstractmethod
-    def on_data_received(self, data: "ParsedMessage"):
-        """데이터 수신 콜백"""
-        pass
-
-    @abstractmethod
-    def on_connection_changed(self, connected: bool):
-        """연결 상태 변경 콜백"""
-        pass
-
-    @abstractmethod
-    def on_error(self, error: Exception):
-        """에러 발생 콜백"""
-        pass
-
-
-class SocketObserver:
-    """옵저버 패턴 구현 - 리스너 관리"""
+    def __new__(cls):
+        """Singleton 패턴 구현"""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
 
     def __init__(self):
-        self._listeners: List[SocketDataListener] = []
-        self._lock = threading.Lock()
+        """초기화 (한 번만 실행)"""
+        if self._initialized:
+            return
 
-    def attach(self, listener: SocketDataListener):
-        """리스너 등록"""
-        with self._lock:
-            if listener not in self._listeners:
-                self._listeners.append(listener)
-                print(f"리스너 등록: {listener.__class__.__name__}")
+        # 소켓 인스턴스 저장소
+        self._clients: Dict[str, TCPClient] = {}
+        self._observers: Dict[str, SocketObserver] = {}
+        self._clients_lock = threading.Lock()
 
-    def detach(self, listener: SocketDataListener):
-        """리스너 제거"""
-        with self._lock:
-            if listener in self._listeners:
-                self._listeners.remove(listener)
-                print(f"리스너 제거: {listener.__class__.__name__}")
+        # 초기화 완료
+        self._initialized = True
 
-    def notify_data(self, data: "ParsedMessage"):
-        """모든 리스너에게 데이터 전달"""
-        with self._lock:
-            listeners = self._listeners.copy()
+        # 프로그램 종료 시 자동 정리
+        atexit.register(self.shutdown_all)
 
-        for listener in listeners:
-            try:
-                listener.on_data_received(data)
-            except Exception as e:
-                print(f"리스너 에러 ({listener.__class__.__name__}): {e}")
-                try:
-                    listener.on_error(e)
-                except:
-                    pass
+    @classmethod
+    def get_instance(cls) -> "SocketManager":
+        """싱글톤 인스턴스 반환"""
+        if cls._instance is None:
+            cls()
+        return cls._instance
 
-    def notify_connection(self, connected: bool):
-        """연결 상태 변경 알림"""
-        with self._lock:
-            listeners = self._listeners.copy()
-
-        for listener in listeners:
-            try:
-                listener.on_connection_changed(connected)
-            except Exception as e:
-                print(f"연결 상태 알림 에러 ({listener.__class__.__name__}): {e}")
-
-    def notify_error(self, error: Exception):
-        """에러 알림"""
-        with self._lock:
-            listeners = self._listeners.copy()
-
-        for listener in listeners:
-            try:
-                listener.on_error(error)
-            except Exception as e:
-                print(f"에러 알림 실패 ({listener.__class__.__name__}): {e}")
-
-    def listener_count(self) -> int:
-        """등록된 리스너 수"""
-        with self._lock:
-            return len(self._listeners)
-
-
-# ==================== Data Parser ====================
-
-
-class DataParser:
-    """데이터 파서 - 프로토콜에 맞게 커스터마이징 가능"""
-
-    @staticmethod
-    def parse(data: bytes) -> "ParsedMessage":
-        """
-        데이터 파싱 (기본 구현 - JSON 기반)
-
-        프로토콜 형식:
-        [4 bytes: length][1 byte: type][N bytes: payload]
-        """
-        try:
-            # 간단한 JSON 파싱 시도
-            try:
-                decoded = data.decode("utf-8")
-                payload = json.loads(decoded)
-                msg_type = payload.get("type", "unknown")
-
-                return ParsedMessage(
-                    message_type=msg_type,
-                    payload=payload,
-                    raw_data=data,
-                    timestamp=time.time(),
-                )
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                pass
-
-            # 바이너리 프로토콜 파싱
-            if len(data) >= 5:
-                length = struct.unpack(">I", data[:4])[0]
-                msg_type = chr(data[4])
-                payload_data = data[5 : 5 + length]
-
-                # 페이로드 파싱 시도
-                try:
-                    payload = json.loads(payload_data.decode("utf-8"))
-                except:
-                    payload = payload_data
-
-                return ParsedMessage(
-                    message_type=msg_type,
-                    payload=payload,
-                    raw_data=data,
-                    timestamp=time.time(),
-                    metadata={"protocol": "binary", "length": length},
-                )
-
-            # 단순 텍스트
-            return ParsedMessage(
-                message_type="text",
-                payload=data.decode("utf-8", errors="ignore"),
-                raw_data=data,
-                timestamp=time.time(),
-            )
-
-        except Exception as e:
-            # 파싱 실패 시 raw 데이터로 처리
-            return ParsedMessage(
-                message_type="raw",
-                payload=data,
-                raw_data=data,
-                timestamp=time.time(),
-                metadata={"error": str(e)},
-            )
-
-
-# ==================== Subprocess TCP Client ====================
-
-
-class SubprocessTCPClient:
-    """서브프로세스 기반 TCP 클라이언트"""
-
-    def __init__(
+    def create_client(
         self,
+        name: str,
         host: str,
         port: int,
-        observer: SocketObserver,
         auto_reconnect: bool = True,
         reconnect_interval: float = 5.0,
         buffer_size: int = 4096,
-    ):
+    ) -> TCPClient:
         """
-        서브프로세스 TCP 클라이언트 초기화
+        TCP 클라이언트 생성
 
         Args:
-            host: 연결할 서버 주소
+            name: 클라이언트 식별 이름
+            host: 서버 주소
             port: 포트 번호
-            observer: 옵저버 객체
             auto_reconnect: 자동 재연결 여부
-            reconnect_interval: 재연결 시도 간격 (초)
+            reconnect_interval: 재연결 간격
             buffer_size: 수신 버퍼 크기
+
+        Returns:
+            TCPClient 인스턴스
+
+        Raises:
+            ValueError: 동일한 이름의 클라이언트가 이미 존재하는 경우
         """
-        self.host = host
-        self.port = port
-        self.observer = observer
-        self.auto_reconnect = auto_reconnect
-        self.reconnect_interval = reconnect_interval
-        self.buffer_size = buffer_size
+        with self._clients_lock:
+            if name in self._clients:
+                raise ValueError(f"클라이언트 '{name}'이(가) 이미 존재합니다.")
 
-        # 프로세스 간 통신
-        self.data_queue = MPQueue()
-        self.command_queue = MPQueue()
-        self.stop_event = MPEvent()  # 즉시 종료 신호
+            # Observer 생성
+            observer = SocketObserver()
+            self._observers[name] = observer
 
-        # 서브프로세스
-        self.process: Optional[Process] = None
-        self.running = False
+            # TCP 클라이언트 생성
+            client = TCPClient(
+                host=host,
+                port=port,
+                observer=observer,
+                auto_reconnect=auto_reconnect,
+                reconnect_interval=reconnect_interval,
+                buffer_size=buffer_size,
+            )
 
-        # 파서
-        self.parser = DataParser()
+            self._clients[name] = client
+            print(f"소켓 클라이언트 생성: {name} ({host}:{port})")
 
-        # 통계
-        self.stats = {
-            "connected": False,
-            "total_received": 0,
-            "total_bytes": 0,
-            "last_received": None,
-        }
+            return client
 
-        # 데이터 처리 스레드
-        self.processor_thread: Optional[threading.Thread] = None
-        self.thread_stop_event = threading.Event()  # 스레드 종료 신호
+    def get_client(self, name: str) -> Optional[TCPClient]:
+        """
+        클라이언트 조회
 
-        atexit.register(self.stop)
+        Args:
+            name: 클라이언트 이름
 
-    def start(self):
-        """클라이언트 시작"""
-        if self.running:
-            print("이미 실행 중입니다.")
-            return
+        Returns:
+            TCPClient 인스턴스 또는 None
+        """
+        with self._clients_lock:
+            return self._clients.get(name)
 
-        self.running = True
+    def get_observer(self, name: str) -> Optional[SocketObserver]:
+        """
+        Observer 조회
 
-        # stop event 초기화
-        self.stop_event.clear()
-        self.thread_stop_event.clear()
+        Args:
+            name: 클라이언트 이름
 
-        # 서브프로세스 시작
-        self.process = Process(
-            target=self._tcp_loop,
-            args=(
-                self.host,
-                self.port,
-                self.data_queue,
-                self.command_queue,
-                self.stop_event,
-                self.auto_reconnect,
-                self.reconnect_interval,
-                self.buffer_size,
-            ),
-            daemon=True,
-        )
-        self.process.start()
-        print(f"TCP 클라이언트 프로세스 시작: {self.host}:{self.port}")
+        Returns:
+            SocketObserver 인스턴스 또는 None
+        """
+        with self._clients_lock:
+            return self._observers.get(name)
 
-        # 데이터 처리 스레드 시작
-        self.processor_thread = threading.Thread(
-            target=self._process_data, daemon=True, name="DataProcessor"
-        )
-        self.processor_thread.start()
-        print("데이터 처리 스레드 시작")
+    def attach_listener(self, name: str, listener: SocketDataListener):
+        """
+        클라이언트에 리스너 등록
 
-    @staticmethod
-    def _tcp_loop(
-        host,
-        port,
-        data_queue,
-        command_queue,
-        stop_event,
-        auto_reconnect,
-        reconnect_interval,
-        buffer_size,
-    ):
-        """TCP 연결 및 수신 루프 (서브프로세스에서 실행)"""
-        sock = None
+        Args:
+            name: 클라이언트 이름
+            listener: 리스너 인스턴스
 
-        while not stop_event.is_set():
-            try:
-                # 연결 시도
-                print(f"[프로세스] {host}:{port} 연결 시도...")
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5.0)
-                sock.connect((host, port))
-                sock.settimeout(0.1)  # 짧은 타임아웃으로 빠른 종료
+        Raises:
+            KeyError: 클라이언트가 존재하지 않는 경우
+        """
+        observer = self.get_observer(name)
+        if observer is None:
+            raise KeyError(f"클라이언트 '{name}'을(를) 찾을 수 없습니다.")
 
-                # 연결 성공 알림
-                data_queue.put(("connection", True))
-                print(f"[프로세스] 연결 성공: {host}:{port}")
+        observer.attach(listener)
 
-                # 수신 루프
-                while not stop_event.is_set():
-                    # 명령 확인
-                    try:
-                        cmd = command_queue.get_nowait()
-                        if cmd == "stop":
-                            break
-                        elif cmd == "disconnect":
-                            print("[프로세스] 연결 종료 명령 수신")
-                            break
-                    except:
-                        pass
+    def detach_listener(self, name: str, listener: SocketDataListener):
+        """
+        클라이언트에서 리스너 제거
 
-                    # 데이터 수신
-                    try:
-                        data = sock.recv(buffer_size)
-                        if not data:
-                            print("[프로세스] 서버 연결 종료")
-                            break
+        Args:
+            name: 클라이언트 이름
+            listener: 리스너 인스턴스
 
-                        # 데이터 전송
-                        data_queue.put(("data", data))
+        Raises:
+            KeyError: 클라이언트가 존재하지 않는 경우
+        """
+        observer = self.get_observer(name)
+        if observer is None:
+            raise KeyError(f"클라이언트 '{name}'을(를) 찾을 수 없습니다.")
 
-                    except socket.timeout:
-                        continue
-                    except Exception as e:
-                        print(f"[프로세스] 수신 에러: {e}")
-                        break
+        observer.detach(listener)
 
-            except Exception as e:
-                print(f"[프로세스] 연결 에러: {e}")
-                data_queue.put(("connection", False))
-                data_queue.put(("error", str(e)))
+    def start_client(self, name: str):
+        """
+        클라이언트 시작
 
-            finally:
-                # 소켓 정리
-                if sock:
-                    try:
-                        sock.close()
-                    except:
-                        pass
-                    sock = None
+        Args:
+            name: 클라이언트 이름
 
-                # 연결 끊김 알림
-                data_queue.put(("connection", False))
+        Raises:
+            KeyError: 클라이언트가 존재하지 않는 경우
+        """
+        client = self.get_client(name)
+        if client is None:
+            raise KeyError(f"클라이언트 '{name}'을(를) 찾을 수 없습니다.")
 
-            # 재연결 시도
-            if not stop_event.is_set() and auto_reconnect:
-                print(f"[프로세스] {reconnect_interval}초 후 재연결 시도...")
-                # 재연결 대기 중에도 stop_event 확인
-                for _ in range(int(reconnect_interval * 10)):
-                    if stop_event.is_set():
-                        break
-                    time.sleep(0.1)
-            else:
-                break
+        client.start()
 
-        print("[프로세스] TCP 루프 종료")
+    def stop_client(self, name: str):
+        """
+        클라이언트 중지
 
-    def _process_data(self):
-        """데이터 처리 루프 (별도 스레드)"""
-        while not self.thread_stop_event.is_set():
-            try:
-                # 큐에서 데이터 가져오기 (짧은 타임아웃)
-                msg_type, data = self.data_queue.get(timeout=0.1)
+        Args:
+            name: 클라이언트 이름
 
-                if msg_type == "data":
-                    # 데이터 파싱
-                    parsed = self.parser.parse(data)
+        Raises:
+            KeyError: 클라이언트가 존재하지 않는 경우
+        """
+        client = self.get_client(name)
+        if client is None:
+            raise KeyError(f"클라이언트 '{name}'을(를) 찾을 수 없습니다.")
 
-                    # 통계 업데이트
-                    self.stats["total_received"] += 1
-                    self.stats["total_bytes"] += len(data)
-                    self.stats["last_received"] = time.time()
+        client.stop()
 
-                    # 옵저버에게 알림
-                    self.observer.notify_data(parsed)
+    def remove_client(self, name: str):
+        """
+        클라이언트 제거 (중지 후 삭제)
 
-                elif msg_type == "connection":
-                    connected = data
-                    self.stats["connected"] = connected
-                    self.observer.notify_connection(connected)
+        Args:
+            name: 클라이언트 이름
+        """
+        with self._clients_lock:
+            client = self._clients.get(name)
+            if client:
+                # 중지
+                try:
+                    client.stop()
+                except:
+                    pass
 
-                elif msg_type == "error":
-                    error = Exception(data)
-                    self.observer.notify_error(error)
+                # 삭제
+                del self._clients[name]
+                if name in self._observers:
+                    del self._observers[name]
 
-            except queue.Empty:
-                continue
-            except Exception as e:
-                print(f"데이터 처리 에러: {e}")
+                print(f"소켓 클라이언트 제거: {name}")
 
-        print("데이터 처리 스레드 종료")
+    def get_client_stats(self, name: str) -> Optional[Dict]:
+        """
+        클라이언트 통계 조회
 
-    def send(self, data: bytes):
-        """데이터 전송 (현재는 수신 전용, 필요시 구현 가능)"""
-        # TODO: 송신 기능 구현
-        pass
+        Args:
+            name: 클라이언트 이름
 
-    def disconnect(self):
-        """연결 종료 (재연결 중지)"""
-        self.command_queue.put("disconnect")
+        Returns:
+            통계 딕셔너리 또는 None
+        """
+        client = self.get_client(name)
+        if client is None:
+            return None
 
-    def stop(self):
-        """클라이언트 중지"""
-        if not self.running:
-            return
+        return client.get_stats()
 
-        print("TCP 클라이언트 중지 중...")
-        self.running = False
+    def is_connected(self, name: str) -> bool:
+        """
+        클라이언트 연결 상태 확인
 
-        # 즉시 종료 신호 전송
-        self.stop_event.set()
-        self.thread_stop_event.set()
+        Args:
+            name: 클라이언트 이름
 
-        # 프로세스에 종료 명령 (추가 보장)
-        try:
-            self.command_queue.put_nowait("stop")
-        except:
-            pass
+        Returns:
+            연결 여부
+        """
+        client = self.get_client(name)
+        if client is None:
+            return False
 
-        # 스레드 먼저 종료 대기 (더 빠름)
-        if self.processor_thread and self.processor_thread.is_alive():
-            self.processor_thread.join(timeout=0.5)  # 0.5초로 단축
+        return client.is_connected()
 
-        # 프로세스 종료 대기
-        if self.process and self.process.is_alive():
-            self.process.join(timeout=0.5)  # 0.5초로 단축
-            if self.process.is_alive():
-                self.process.terminate()
-                self.process.join(timeout=0.2)  # terminate 후 짧은 대기
+    def list_clients(self) -> list[str]:
+        """
+        모든 클라이언트 이름 목록 반환
 
-        print("TCP 클라이언트 중지됨")
+        Returns:
+            클라이언트 이름 리스트
+        """
+        with self._clients_lock:
+            return list(self._clients.keys())
 
-    def get_stats(self) -> Dict:
-        """통계 정보 반환"""
-        return self.stats.copy()
+    def get_all_stats(self) -> Dict[str, Dict]:
+        """
+        모든 클라이언트의 통계 반환
+
+        Returns:
+            {클라이언트명: 통계} 딕셔너리
+        """
+        with self._clients_lock:
+            return {name: client.get_stats() for name, client in self._clients.items()}
+
+    def shutdown_all(self):
+        """모든 클라이언트 종료"""
+        print("모든 소켓 클라이언트 종료 중...")
+
+        with self._clients_lock:
+            for name, client in list(self._clients.items()):
+                try:
+                    print(f"  - {name} 종료 중...")
+                    client.stop()
+                except Exception as e:
+                    print(f"  - {name} 종료 실패: {e}")
+
+            self._clients.clear()
+            self._observers.clear()
+
+        print("모든 소켓 클라이언트 종료 완료")
+
+
+# ==================== 편의 함수 ====================
+
+
+def get_socket_manager() -> SocketManager:
+    """소켓 매니저 인스턴스 반환 (싱글톤)"""
+    return SocketManager.get_instance()
+
+
+def create_socket_client(
+    name: str,
+    host: str,
+    port: int,
+    auto_reconnect: bool = True,
+    reconnect_interval: float = 5.0,
+    buffer_size: int = 4096,
+) -> TCPClient:
+    """
+    소켓 클라이언트 생성 (편의 함수)
+
+    Args:
+        name: 클라이언트 식별 이름
+        host: 서버 주소
+        port: 포트 번호
+        auto_reconnect: 자동 재연결 여부
+        reconnect_interval: 재연결 간격
+        buffer_size: 수신 버퍼 크기
+
+    Returns:
+        TCPClient 인스턴스
+    """
+    manager = get_socket_manager()
+    return manager.create_client(
+        name=name,
+        host=host,
+        port=port,
+        auto_reconnect=auto_reconnect,
+        reconnect_interval=reconnect_interval,
+        buffer_size=buffer_size,
+    )
+
+
+def get_socket_client(name: str) -> Optional[TCPClient]:
+    """소켓 클라이언트 조회 (편의 함수)"""
+    manager = get_socket_manager()
+    return manager.get_client(name)
+
+
+def attach_socket_listener(name: str, listener: SocketDataListener):
+    """리스너 등록 (편의 함수)"""
+    manager = get_socket_manager()
+    manager.attach_listener(name, listener)
+
+
+def start_socket_client(name: str):
+    """소켓 클라이언트 시작 (편의 함수)"""
+    manager = get_socket_manager()
+    manager.start_client(name)
+
+
+def stop_socket_client(name: str):
+    """소켓 클라이언트 중지 (편의 함수)"""
+    manager = get_socket_manager()
+    manager.stop_client(name)
+
+
+def remove_socket_client(name: str):
+    """소켓 클라이언트 제거 (편의 함수)"""
+    manager = get_socket_manager()
+    manager.remove_client(name)
