@@ -4,12 +4,23 @@ Log Manager - 로거 인스턴스 관리
 핸들러 등록/해제 및 전역 로거 관리
 """
 
-import logging
-import threading
-from typing import Dict, Optional
 import atexit
+import getpass
+import logging
+from pathlib import Path
+import threading
+import time
+from typing import Dict, Optional
 
 from service.core.asynclogger import AsyncLoggerCore
+
+# 
+currentTime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+print(f"[{currentTime}] LogManager 모듈 로드 완료")
+
+log_dir_path = "logs"
+username = getpass.getuser()
+filename = f"{username}_{currentTime}"
 
 
 # ==================== Global Logger Registry ====================
@@ -181,19 +192,18 @@ class LoggerManager:
 
 # ==================== Convenience Functions ====================
 
-
 def get_logger(
-    name: str = "app",
+    name: str = filename,
     log_dir: str = "logs",
     log_level: int = logging.INFO,
     console_output: bool = True,
     file_output: bool = True,
     max_bytes: int = 10 * 1024 * 1024,
     backup_count: int = 5,
-    reuse: bool = True,
+    reuse: bool = True,  # 재사용 여부 설정
 ) -> AsyncLoggerCore:
     """
-    편의 함수: 로거 인스턴스 생성 또는 반환
+    편의 함수: 로거 인스턴스 초기화
     LoggerManager.get_logger()의 래퍼
     """
     return LoggerManager.get_logger(

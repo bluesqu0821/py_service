@@ -70,7 +70,7 @@ def _log_listener_process(
     )
 
     file_fmt = logging.Formatter(
-        fmt="%(asctime)s [%(levelname)-8s] %(name)s - [%(pathname)s:%(lineno)d in %(funcName)s()] - %(message)s",
+        fmt="%(asctime)s [%(levelname)-8s] - [%(pathname)s:%(lineno)d in %(funcName)s()] - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
@@ -97,17 +97,17 @@ def _log_listener_process(
         file_handler.setFormatter(file_fmt)
         listener.addHandler(file_handler)
 
-        # 에러 로그
-        error_log = log_dir / f"{logger_name}_error.log"
-        error_handler = logging.handlers.RotatingFileHandler(
-            error_log,
-            maxBytes=max_bytes,
-            backupCount=backup_count,
-            encoding="utf-8",
-        )
-        error_handler.setLevel(logging.ERROR)
-        error_handler.setFormatter(file_fmt)
-        listener.addHandler(error_handler)
+        # # 에러 로그
+        # error_log = log_dir / f"{logger_name}_error.log"
+        # error_handler = logging.handlers.RotatingFileHandler(
+        #     error_log,
+        #     maxBytes=max_bytes,
+        #     backupCount=backup_count,
+        #     encoding="utf-8",
+        # )
+        # error_handler.setLevel(logging.ERROR)
+        # error_handler.setFormatter(file_fmt)
+        # listener.addHandler(error_handler)
 
     # 로그 레코드 수신 및 처리 루프
     while True:
