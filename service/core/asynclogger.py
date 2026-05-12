@@ -70,7 +70,8 @@ def _log_listener_process(
     )
 
     file_fmt = logging.Formatter(
-        fmt="%(asctime)s [%(levelname)-8s] - [%(pathname)s:%(lineno)d in %(funcName)s()] - %(message)s",
+        # fmt="%(asctime)s [%(levelname)-8s] - [%(pathname)s:%(lineno)d in %(funcName)s()] - %(message)s",
+        fmt="%(asctime)s [%(levelname)-8s] - [%(filename)s:%(lineno)d in %(funcName)s()] - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 

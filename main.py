@@ -5,24 +5,21 @@ from service.manager.logmanager import get_logger
 
 def worker():
     # 각 실행 컨텍스트에서 로거를 가져와 사용 (Windows spawn 환경에서도 안전)
-    log = get_logger()
-    log.info("워커 프로세스 시작")
+    get_logger().debug("워커 프로세스 시작")
 
 def main():
     print("=== 로거 매니저 테스트 ===\n")
-
-    log = get_logger()
-    log.info("메인 프로세스 로그")
     
-    log.error("에러 로그 테스트")
+    get_logger().info("메인 프로세스 로그")
+    get_logger().error("에러 로그 테스트")
     
     
     worker()
     
     time.sleep(0.5)  # 로그 처리 대기
     
-    log.warning("워닝 로그 테스트")
-    log.critical("크리티컬 로그 테스트")
+    get_logger().warning("워닝 로그 테스트")
+    get_logger().critical("크리티컬 로그 테스트")
     
 
     # # 1. 로거 생성

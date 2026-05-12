@@ -192,6 +192,8 @@ class LoggerManager:
 
 # ==================== Convenience Functions ====================
 
+_logger: Optional[AsyncLoggerCore] = None
+
 def get_logger(
     name: str = filename,
     log_dir: str = "logs",
@@ -206,17 +208,19 @@ def get_logger(
     편의 함수: 로거 인스턴스 초기화
     LoggerManager.get_logger()의 래퍼
     """
-    return LoggerManager.get_logger(
-        name=name,
-        log_dir=log_dir,
-        log_level=log_level,
-        console_output=console_output,
-        file_output=file_output,
-        max_bytes=max_bytes,
-        backup_count=backup_count,
-        reuse=reuse,
-    )
-
+    global _logger
+    if _logger is None:
+        _logger = LoggerManager.get_logger(
+            name=name,
+            log_dir=log_dir,
+            log_level=log_level,
+            console_output=console_output,
+            file_output=file_output,
+            max_bytes=max_bytes,
+            backup_count=backup_count,
+            reuse=reuse,
+        )
+    return _logger
 
 def register_logger(name: str, logger: AsyncLoggerCore):
     """편의 함수: 로거 등록"""
